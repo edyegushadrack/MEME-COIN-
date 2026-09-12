@@ -49,3 +49,28 @@ volume — the swap points are commented in each file.
 Run with different `scoreThreshold` values (60, 70, 80...) to see where
 your scoring engine's output actually starts correlating with real
 outcomes, before trusting it with live capital.
+
+## Telegram alerts + wallet monitoring
+
+- `telegramNotifier.js` — Telegram Bot API wrapper (plain fetch, no extra
+  dependency) plus `/track <address> [label]` and `/untrack <address>`
+  commands to manage watched wallets straight from Telegram
+- `walletMonitor.js` — real-time Solana wallet subscriptions via
+  `connection.onLogs`, classifies buy/sell by diffing token balances,
+  auto re-syncs every few minutes to pick up new tracked wallets
+- `tracked_wallets.sql` — schema for the wallet list + activity log
+- `telegramIntegration.js` — orchestrator wiring wallet monitoring into
+  Telegram alerts; also exposes `notifyTokenPassed()` for the existing
+  scoring pipeline to call once a token clears the veto filter + score
+  threshold, so your own scanner becomes the "signal source" instead of
+  someone else's Telegram calls
+
+### One-time setup
+
+1. Message @BotFather on Telegram, `/newbot`, save the token
+2. Message your new bot once, then hit
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your chat_id
+3. Add to `.env`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SOLANA_RPC_URL`
+4. Run `tracked_wallets.sql` in the meme-scanner Supabase project
+5. `npm install @solana/web3.js @supabase/supabase-js` if not already present
+6. Run `node telegramIntegration.js` alongside your main scanner process
