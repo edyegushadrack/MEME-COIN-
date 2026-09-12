@@ -33,3 +33,19 @@ Deployer-history and common-funding checks currently use raw
 `getSignaturesForAddress` / `getParsedTransaction` RPC calls (no extra API
 key needed). Swap in a Helius (or similar) indexer call for production
 volume — the swap points are commented in each file.
+
+## Backtesting
+
+- `backtestEngine.js` — simulates one trade's exits (scaled take-profits,
+  decay-triggered trailing stop, hard stop, time-based exit) against a
+  historical price series
+- `runBacktest.js` — pulls historical tokens + price history from Supabase
+  and runs each through the engine. **Edit `fetchHistoricalTokens` and
+  `fetchPriceSeries` to match your real table/column names** — they're
+  written against a placeholder schema (`tokens.score`, `price_snapshots`)
+- `expectancyStats.js` — aggregates trade results into win rate, avg
+  win/loss, expectancy per trade, total return, and max drawdown
+
+Run with different `scoreThreshold` values (60, 70, 80...) to see where
+your scoring engine's output actually starts correlating with real
+outcomes, before trusting it with live capital.
