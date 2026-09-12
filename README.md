@@ -74,3 +74,23 @@ outcomes, before trusting it with live capital.
 4. Run `tracked_wallets.sql` in the meme-scanner Supabase project
 5. `npm install @solana/web3.js @supabase/supabase-js` if not already present
 6. Run `node telegramIntegration.js` alongside your main scanner process
+
+## Private alpha-wallet discovery (not a public leaderboard)
+
+- `token_early_buyers.sql` — logs every early buyer on every detected
+  token (not just wallets already tracked). Needs to be wired into the
+  detection handler to start capturing data going forward.
+- `discoverAlphaWallets.js` — mines that history for wallets that show up
+  early, repeatedly, on tokens that actually mooned (default: 3x+, within
+  2 minutes of launch, on 3+ separate winners). Cross-checks against
+  bundler-detection data to exclude wallets that only look "early" because
+  they were part of a manipulated bundle.
+
+This is the private alternative to public KOL leaderboards (Kolscan, etc.)
+— those rank wallets everyone can already see, which makes following them
+a crowded trade. This ranks wallets by a pattern only your own scanner's
+detection history can see. Needs a few weeks of logged data before it's
+useful — same rule as the backtesting harness.
+
+Feed discovered wallets into `/track <address>` (see Telegram section
+above) to put them under real-time monitoring.
