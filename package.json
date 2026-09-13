@@ -1,0 +1,20 @@
+{
+  "name": "meme-scanner",
+  "version": "0.1.0",
+  "description": "Solana meme coin launch detector, scorer, and paper-trading backtester",
+  "type": "module",
+  "scripts": {
+    "listen": "node src/scripts/listen.js",
+    "track": "node src/scripts/trackPrices.js",
+    "backtest": "node src/scripts/backtest.js",
+    "wallet-bot": "node src/scripts/telegramBot.js",
+    "discover-wallets": "node src/scripts/discoverAlphaWallets.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.3",
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0",
+    "node-fetch": "^3.3.2"
+  }
+}

@@ -1,96 +1,97 @@
-# MEME-COIN- — Pre-Score Forensics & Bundler Detection
+# MEME-COIN- (meme-scanner)
 
-Loss-prevention pre-filter for the Solana meme coin scanner. Runs before the
-scoring engine, as a hard veto layer rather than a soft score input.
+Detects new pump.fun launches, filters out structurally manipulated ones,
+scores the rest for rug-risk/momentum signals, logs everything to Supabase,
+and lets you backtest whether the scoring model actually works — all
+before any real money is at risk. Also includes real-time wallet
+monitoring and Telegram alerts, so your own scanner can be your signal
+source instead of following someone else's calls.
 
-## Files
+## What this is NOT (yet)
+No wallet, no swaps, no execution. This is detection → veto → scoring →
+paper-trading → alerting. Execution gets added once the backtest shows the
+scoring model has real edge — see "Next steps" below.
 
-- `contractForensics.js` — mint/freeze authority checks, deployer wallet
-  history, and deployer rug-history cross-check against your own Supabase logs
-- `bundlerDetection.js` — same-slot bundled buy detection and common-funding
-  wallet clustering (catches fake early volume/holder count)
-- `preScoreFilter.js` — glue layer combining both checks into a single
-  veto/pass decision, called between token detection and the scoring engine
-- `vetoed_tokens.sql` — Supabase table + indexes for logging every rejection
-  and why, doubling as future backtest data for tuning thresholds
+## Setup (all free tier)
 
-## Wiring it in
+1. **Create a new Supabase project** (free tier, keep it separate from any
+   other project you run). In the SQL editor, run `schema.sql` — this
+   includes the original `launches`/`price_snapshots` tables plus the
+   wallet-monitoring and alpha-discovery additions.
+2. **Copy `.env.example` to `.env`** and fill in:
+   - `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` from your Supabase project's settings
+   - `SOLANA_RPC_URL` — the public `https://api.mainnet-beta.solana.com`
+     works to start; if you hit rate limits, a free Helius or QuickNode
+     account gives a higher-limit RPC URL to drop in instead
+   - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — message @BotFather to create
+     a bot and get a token, then message your bot once and hit
+     `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your chat_id
+3. **Install and run:**
+   ```bash
+   npm install
+   npm run listen         # terminal 1 — detects + vetoes + scores + logs + alerts
+   npm run track          # terminal 2 — snapshots prices every 5 min for open launches
+   npm run wallet-bot      # terminal 3 — wallet monitoring + /track /untrack commands
+   ```
+4. **Let it run.** Realistically a few days to a week, so you accumulate
+   enough logged launches with outcome data to make the backtest meaningful.
+5. **Run the backtest:**
+   ```bash
+   npm run backtest
+   ```
+   This tells you, for several score thresholds, what the average/median
+   return and win rate would have been if you'd paper-bought everything
+   above that threshold. That's your evidence for whether the scoring
+   model — and which threshold — actually has edge.
+6. **Discover your own alpha wallets, once you have data:**
+   ```bash
+   npm run discover-wallets
+   ```
+   Mines your own logged history for wallets that repeatedly bought early
+   on launches that later mooned — private to your own scanner's data, not
+   a public leaderboard like Kolscan that thousands of other traders
+   already watch. Feed promising wallets into `/track <address>` in
+   Telegram to put them under real-time monitoring.
 
-```js
-const { preScoreFilter, logVetoedToken } = require('./preScoreFilter');
+## Bundler / sniper detection
 
-const filterResult = await preScoreFilter({ connection, supabase, tokenEvent });
-if (filterResult.veto) {
-  await logVetoedToken(supabase, filterResult);
-  return; // don't send to scoreToken()
-}
-const score = await scoreToken(tokenEvent);
-```
+Before a launch is even scored, `bundlerDetection.js` checks whether many
+distinct wallets bought within seconds of each other right after launch —
+a strong signal of one actor faking early volume/holder count with
+multiple wallets. If flagged, the launch is vetoed and skipped entirely
+(logged via a Telegram alert), the same way an un-renounced mint/freeze
+authority already disqualifies a launch in `scoreLaunch.js`.
 
-Run `vetoed_tokens.sql` in the Supabase SQL editor first.
+## Tuning the scoring model
 
-Deployer-history and common-funding checks currently use raw
-`getSignaturesForAddress` / `getParsedTransaction` RPC calls (no extra API
-key needed). Swap in a Helius (or similar) indexer call for production
-volume — the swap points are commented in each file.
+`src/scoring/scoreLaunch.js` has the weights. They're a reasonable starting
+guess, not a fact. Once you have backtest data:
+- If mint/freeze-authority-renounced tokens aren't actually outperforming,
+  drop that weight.
+- If buy velocity turns out to correlate strongly with 15-min returns,
+  raise its weight and lower others.
+- Add new signals as columns to `launches` + fields in `scoreLaunch.js` —
+  e.g. dev wallet history, LP lock duration, if you find data sources for them.
 
-## Backtesting
+## Next steps once the backtest shows real edge
+- Add Raydium pool-creation detection (graduated tokens), not just pump.fun
+- Add execution via Jupiter, starting with tiny position sizes
+- Add stop-loss/take-profit/time-based exit rules
+- Only then consider a dedicated funded hot wallet
 
-- `backtestEngine.js` — simulates one trade's exits (scaled take-profits,
-  decay-triggered trailing stop, hard stop, time-based exit) against a
-  historical price series
-- `runBacktest.js` — pulls historical tokens + price history from Supabase
-  and runs each through the engine. **Edit `fetchHistoricalTokens` and
-  `fetchPriceSeries` to match your real table/column names** — they're
-  written against a placeholder schema (`tokens.score`, `price_snapshots`)
-- `expectancyStats.js` — aggregates trade results into win rate, avg
-  win/loss, expectancy per trade, total return, and max drawdown
-
-Run with different `scoreThreshold` values (60, 70, 80...) to see where
-your scoring engine's output actually starts correlating with real
-outcomes, before trusting it with live capital.
-
-## Telegram alerts + wallet monitoring
-
-- `telegramNotifier.js` — Telegram Bot API wrapper (plain fetch, no extra
-  dependency) plus `/track <address> [label]` and `/untrack <address>`
-  commands to manage watched wallets straight from Telegram
-- `walletMonitor.js` — real-time Solana wallet subscriptions via
-  `connection.onLogs`, classifies buy/sell by diffing token balances,
-  auto re-syncs every few minutes to pick up new tracked wallets
-- `tracked_wallets.sql` — schema for the wallet list + activity log
-- `telegramIntegration.js` — orchestrator wiring wallet monitoring into
-  Telegram alerts; also exposes `notifyTokenPassed()` for the existing
-  scoring pipeline to call once a token clears the veto filter + score
-  threshold, so your own scanner becomes the "signal source" instead of
-  someone else's Telegram calls
-
-### One-time setup
-
-1. Message @BotFather on Telegram, `/newbot`, save the token
-2. Message your new bot once, then hit
-   `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your chat_id
-3. Add to `.env`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SOLANA_RPC_URL`
-4. Run `tracked_wallets.sql` in the meme-scanner Supabase project
-5. `npm install @solana/web3.js @supabase/supabase-js` if not already present
-6. Run `node telegramIntegration.js` alongside your main scanner process
-
-## Private alpha-wallet discovery (not a public leaderboard)
-
-- `token_early_buyers.sql` — logs every early buyer on every detected
-  token (not just wallets already tracked). Needs to be wired into the
-  detection handler to start capturing data going forward.
-- `discoverAlphaWallets.js` — mines that history for wallets that show up
-  early, repeatedly, on tokens that actually mooned (default: 3x+, within
-  2 minutes of launch, on 3+ separate winners). Cross-checks against
-  bundler-detection data to exclude wallets that only look "early" because
-  they were part of a manipulated bundle.
-
-This is the private alternative to public KOL leaderboards (Kolscan, etc.)
-— those rank wallets everyone can already see, which makes following them
-a crowded trade. This ranks wallets by a pattern only your own scanner's
-detection history can see. Needs a few weeks of logged data before it's
-useful — same rule as the backtesting harness.
-
-Feed discovered wallets into `/track <address>` (see Telegram section
-above) to put them under real-time monitoring.
+## Known limitations to keep in mind
+- The pump.fun price endpoint used here is the public frontend API — fine
+  for a personal research project, but not a documented/stable contract.
+  If it breaks, that's the first thing to check.
+- Free RPC endpoints rate-limit under load; if `fetchOnChainSignals`
+  errors frequently, that's your cue to move to a free Helius/QuickNode key.
+- The buy-velocity and bundler-detection signals only count trades that
+  arrive over the same WebSocket connection while your process is
+  running — they're approximations, not ground-truth counts.
+- `traderPublicKey` is assumed to be PumpPortal's field name for the
+  buyer's wallet on trade events. If bundler detection never fires even on
+  obviously bundled launches, verify this field name against a raw logged
+  message first.
+- Wallet monitoring (`walletMonitor.js`) classifies buy/sell by diffing
+  token balances on the transaction; it can misfire on complex multi-hop
+  swaps routed through several pools.
