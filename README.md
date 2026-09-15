@@ -95,3 +95,5 @@ guess, not a fact. Once you have backtest data:
 - Wallet monitoring (`walletMonitor.js`) classifies buy/sell by diffing
   token balances on the transaction; it can misfire on complex multi-hop
   swaps routed through several pools.
+
+_Last verified: 2026-09-15_
