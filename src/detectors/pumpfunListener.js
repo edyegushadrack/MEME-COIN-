@@ -1,61 +1,53 @@
 import WebSocket from 'ws';
+import { Connection } from '@solana/web3.js';
 import { config } from '../config.js';
 import { fetchOnChainSignals } from '../scoring/fetchOnChainSignals.js';
 import { scoreLaunch } from '../scoring/scoreLaunch.js';
 import { insertLaunch, supabase } from '../db/supabase.js';
 import { detectBundledBuys } from './bundlerDetection.js';
+import { subscribeToTokenTrades } from './bondingCurveWatcher.js';
 import { sendLaunchAlert, sendVetoAlert } from '../notify/telegramNotifier.js';
 
 // Tracks buys (count + individual buyer addresses/timestamps) per mint in
 // the first 90s after detection, purely in memory.
 const buyCounters = new Map();
 
-// The full set of mints we currently want trade updates for. Re-sent in
-// FULL on every add/remove, rather than sending just the single changed
-// mint — subscribeTokenTrade appears to use REPLACE semantics, not
-// additive, so sending only one mint at a time silently drops coverage
-// for every other token that was previously subscribed the instant the
-// next token launches (which happens multiple times per second on
-// pump.fun). This was the actual root cause of buys_first_90s staying at
-// 0 for every single launch, confirmed by checking real logged data —
-// even tokens that scored well enough to trigger a paper-buy alert
-// showed zero tracked buyers, which isn't realistic given pump.fun's
-// bot/sniper traffic on every launch.
-const activeMints = new Set();
+// Per-mint on-chain log subscription IDs, so each can be unsubscribed
+// individually once its 90s window closes.
+const tradeSubscriptions = new Map();
 
-let debugMessageCount = 0;
+// Shared RPC connection for on-chain trade watching. New tokens are
+// detected via PumpPortal's free subscribeNewToken (ws below); individual
+// buy/sell activity is watched directly on-chain via this connection,
+// since PumpPortal's subscribeTokenTrade requires a funded API key
+// (0.02+ SOL) that this project doesn't have.
+const connection = new Connection(config.rpcUrl, 'confirmed');
 
-// Module-level reference to the live socket, so subscription helpers and
-// handleNewLaunch can send messages as the active-mint set changes.
 let ws;
-
-function resubscribeToActiveMints() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ method: 'subscribeTokenTrade', keys: [...activeMints] }));
-}
 
 function startBuyCounter(mint) {
   buyCounters.set(mint, { count: 0, startedAt: Date.now(), buys: [] });
-  activeMints.add(mint);
-  resubscribeToActiveMints();
 
-  setTimeout(() => {
-    buyCounters.delete(mint);
-    activeMints.delete(mint);
-    resubscribeToActiveMints();
-  }, 90_000);
-}
-
-function recordBuy(mint, traderAddress) {
-  const counter = buyCounters.get(mint);
-  if (!counter) return;
-  counter.count += 1;
-  if (traderAddress) {
+  const subId = subscribeToTokenTrades(connection, mint, (event) => {
+    const counter = buyCounters.get(mint);
+    if (!counter) return; // window already closed
+    if (event.type !== 'buy') return; // only buys count toward buysFirst90s / early buyers
+    counter.count += 1;
     counter.buys.push({
-      address: traderAddress,
+      address: event.buyer,
       secondsAfterLaunch: (Date.now() - counter.startedAt) / 1000,
     });
-  }
+  });
+  tradeSubscriptions.set(mint, subId);
+
+  setTimeout(async () => {
+    buyCounters.delete(mint);
+    const subId = tradeSubscriptions.get(mint);
+    if (subId != null) {
+      await connection.removeOnLogsListener(subId).catch(() => {});
+      tradeSubscriptions.delete(mint);
+    }
+  }, 90_000);
 }
 
 function getBuyCount(mint) {
@@ -72,8 +64,9 @@ export function startPumpfunListener() {
   ws.on('open', () => {
     console.log('[pumpfun] connected, subscribing to new token events');
     ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
-    // Trade subscriptions are managed entirely via resubscribeToActiveMints()
-    // as tokens are detected/expire — see startBuyCounter above.
+    // Trade activity is watched on-chain per-mint (see bondingCurveWatcher.js
+    // + startBuyCounter above), not via PumpPortal — subscribeTokenTrade
+    // requires a funded API key this project doesn't have.
   });
 
   ws.on('message', async (raw) => {
@@ -84,27 +77,12 @@ export function startPumpfunListener() {
       return;
     }
 
-    // TEMPORARY DEBUG: log the raw shape of the first 15 non-create
-    // messages so we can see real field names instead of guessing again.
-    // Remove this block once buy/sell tracking is confirmed working.
-    if (msg.txType !== 'create') {
-      debugMessageCount++;
-      if (debugMessageCount <= 15) {
-        console.log(`[DEBUG raw message #${debugMessageCount}]`, JSON.stringify(msg));
-      }
-    }
-
     // New token creation event
     if (msg.mint && msg.txType === 'create') {
       startBuyCounter(msg.mint);
       handleNewLaunch(msg).catch((err) =>
         console.error('[pumpfun] handleNewLaunch error:', err.message)
       );
-    }
-
-    // Trade event on a token we're currently tracking in the buy-velocity window.
-    if (msg.mint && msg.txType === 'buy') {
-      recordBuy(msg.mint, msg.traderPublicKey);
     }
   });
 
@@ -136,9 +114,8 @@ async function logEarlyBuyers(mintAddress, buys) {
 
 async function handleNewLaunch(msg) {
   // Give the token ~90s to accumulate initial buy activity before scoring,
-  // since buy velocity is one of the signals. This trades a little latency
-  // for a materially better signal. Unsubscribe happens automatically via
-  // the setTimeout in startBuyCounter, not here.
+  // since buy velocity is one of the signals. Unsubscribe happens
+  // automatically via the setTimeout in startBuyCounter, not here.
   await new Promise((resolve) => setTimeout(resolve, 90_000));
 
   const buys = getBuys(msg.mint);
@@ -147,9 +124,7 @@ async function handleNewLaunch(msg) {
   // each other right after launch is very unlikely to be organic — it's
   // usually one actor faking early volume/holder count with many wallets.
   // This is a hard veto, done BEFORE scoring, same reasoning as the
-  // authority-renounced disqualifier already in scoreLaunch.js: a
-  // structurally manipulated launch shouldn't be rescued by a good score
-  // on other signals.
+  // authority-renounced disqualifier already in scoreLaunch.js.
   const bundlerCheck = detectBundledBuys(buys);
   if (bundlerCheck.likelyBundled) {
     console.log(
