@@ -11,6 +11,12 @@ export const config = {
   paperPositionSizeSol: Number(process.env.PAPER_POSITION_SIZE_SOL ?? 0.5),
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
+  // Optional, separate bot for wallet-activity alerts + /track /untrack,
+  // so they land in a different Telegram chat than launch alerts. Falls
+  // back to the main bot above if these aren't set, so this stays
+  // backward-compatible with a single-bot setup.
+  walletTelegramBotToken: process.env.WALLET_TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN,
+  walletTelegramChatId: process.env.WALLET_TELEGRAM_CHAT_ID || process.env.TELEGRAM_CHAT_ID,
 };
 
 export function assertConfig(keys) {

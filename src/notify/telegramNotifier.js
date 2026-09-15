@@ -2,34 +2,40 @@
  * telegramNotifier.js
  *
  * Minimal Telegram Bot API wrapper using Node's built-in fetch (Node 18+).
- * No extra dependency needed for sending; `node-fetch` (already a
- * dependency for trackPrices.js) covers getUpdates too if your Node
- * version is older.
  *
- * One-time setup:
+ * Supports TWO bots so launch alerts and wallet activity don't collide in
+ * the same chat:
+ *   - Main bot (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) — launch/veto alerts
+ *   - Wallet bot (WALLET_TELEGRAM_BOT_TOKEN / WALLET_TELEGRAM_CHAT_ID) —
+ *     wallet buy/sell activity + /track /untrack commands
+ * If the wallet-specific vars aren't set, everything falls back to the
+ * main bot (see config.js) — so a single-bot setup still works fine.
+ *
+ * One-time setup per bot:
  * 1. Message @BotFather on Telegram, /newbot, save the token
  * 2. Message your new bot once, then visit
  *    https://api.telegram.org/bot<TOKEN>/getUpdates to find your chat_id
- * 3. Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to .env
  */
 
 import { config } from '../config.js';
 
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
 
-function apiUrl(method) {
-  return `${TELEGRAM_API_BASE}/bot${config.telegramBotToken}/${method}`;
+function apiUrl(botToken, method) {
+  return `${TELEGRAM_API_BASE}/bot${botToken}/${method}`;
 }
 
-export async function sendMessage(text, { parseMode = 'Markdown' } = {}) {
-  if (!config.telegramBotToken || !config.telegramChatId) return null;
+export async function sendMessage(text, { parseMode = 'Markdown', botToken, chatId } = {}) {
+  const token = botToken ?? config.telegramBotToken;
+  const chat = chatId ?? config.telegramChatId;
+  if (!token || !chat) return null;
 
   try {
-    const res = await fetch(apiUrl('sendMessage'), {
+    const res = await fetch(apiUrl(token, 'sendMessage'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: config.telegramChatId,
+        chat_id: chat,
         text,
         parse_mode: parseMode,
         disable_web_page_preview: true,
@@ -44,7 +50,7 @@ export async function sendMessage(text, { parseMode = 'Markdown' } = {}) {
   }
 }
 
-/** Alert for a launch that cleared the paper-buy score threshold. */
+/** Alert for a launch that cleared the paper-buy score threshold. Uses the MAIN bot. */
 export function formatLaunchAlert({ mint_address, symbol, score, score_breakdown }) {
   const topSignals = Object.entries(score_breakdown || {})
     .sort((a, b) => b[1] - a[1])
@@ -64,7 +70,7 @@ export async function sendLaunchAlert(launch) {
   return sendMessage(formatLaunchAlert(launch));
 }
 
-/** Alert for a launch vetoed by bundler detection before scoring. */
+/** Alert for a launch vetoed by bundler detection before scoring. Uses the MAIN bot. */
 export function formatVetoAlert({ mint_address, reason }) {
   return `⚠️ *Vetoed before scoring* — \`${mint_address}\`\nReason: ${reason}`;
 }
@@ -73,7 +79,7 @@ export async function sendVetoAlert(details) {
   return sendMessage(formatVetoAlert(details));
 }
 
-/** Alert for tracked-wallet buy/sell activity. */
+/** Alert for tracked-wallet buy/sell activity. Uses the WALLET bot. */
 export function formatWalletActivityAlert({ walletAddress, walletLabel, type, mintAddress, amount, signature }) {
   const label = walletLabel ? `${walletLabel} (\`${walletAddress.slice(0, 6)}...\`)` : `\`${walletAddress}\``;
   const action = type === 'buy' ? '🟢 BOUGHT' : type === 'sell' ? '🔴 SOLD' : '↕️ MOVED';
@@ -85,16 +91,20 @@ export function formatWalletActivityAlert({ walletAddress, walletLabel, type, mi
 }
 
 export async function sendWalletActivityAlert(event) {
-  return sendMessage(formatWalletActivityAlert(event));
+  return sendMessage(formatWalletActivityAlert(event), {
+    botToken: config.walletTelegramBotToken,
+    chatId: config.walletTelegramChatId,
+  });
 }
 
 /**
  * Minimal long-polling handler for /track <address> [label] and
- * /untrack <address>. Call `runCommandPolling(supabase)` once, in its own
- * process (see src/scripts/telegramBot.js) — it loops forever by design.
+ * /untrack <address>. Uses the WALLET bot. Call `runCommandPolling(supabase)`
+ * once, in its own process (see src/scripts/telegramBot.js) — it loops
+ * forever by design.
  */
-async function getUpdates(offset) {
-  const res = await fetch(apiUrl('getUpdates') + `?timeout=30&offset=${offset}`);
+async function getUpdates(botToken, offset) {
+  const res = await fetch(apiUrl(botToken, 'getUpdates') + `?timeout=30&offset=${offset}`);
   return res.json();
 }
 
@@ -132,18 +142,20 @@ async function handleCommand(supabase, message) {
 }
 
 export async function runCommandPolling(supabase, { pollIntervalMs = 2000 } = {}) {
+  const botToken = config.walletTelegramBotToken;
+  const chatId = config.walletTelegramChatId;
   let offset = 0;
   console.log('[telegram] command polling started (/track, /untrack)...');
 
   while (true) {
     try {
-      const updates = await getUpdates(offset);
+      const updates = await getUpdates(botToken, offset);
       if (updates.ok && updates.result.length) {
         for (const update of updates.result) {
           offset = update.update_id + 1;
-          if (update.message && String(update.message.chat.id) === String(config.telegramChatId)) {
+          if (update.message && String(update.message.chat.id) === String(chatId)) {
             const reply = await handleCommand(supabase, update.message);
-            if (reply) await sendMessage(reply);
+            if (reply) await sendMessage(reply, { botToken, chatId });
           }
         }
       }
