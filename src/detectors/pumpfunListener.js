@@ -10,14 +10,38 @@ import { sendLaunchAlert, sendVetoAlert } from '../notify/telegramNotifier.js';
 // the first 90s after detection, purely in memory.
 const buyCounters = new Map();
 
-// Module-level reference to the live socket, so handleNewLaunch can send
-// subscribe/unsubscribe messages for individual tokens as they're detected
-// and as their 90s tracking window closes.
+// The full set of mints we currently want trade updates for. Re-sent in
+// FULL on every add/remove, rather than sending just the single changed
+// mint — subscribeTokenTrade appears to use REPLACE semantics, not
+// additive, so sending only one mint at a time silently drops coverage
+// for every other token that was previously subscribed the instant the
+// next token launches (which happens multiple times per second on
+// pump.fun). This was the actual root cause of buys_first_90s staying at
+// 0 for every single launch, confirmed by checking real logged data —
+// even tokens that scored well enough to trigger a paper-buy alert
+// showed zero tracked buyers, which isn't realistic given pump.fun's
+// bot/sniper traffic on every launch.
+const activeMints = new Set();
+
+// Module-level reference to the live socket, so subscription helpers and
+// handleNewLaunch can send messages as the active-mint set changes.
 let ws;
+
+function resubscribeToActiveMints() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ method: 'subscribeTokenTrade', keys: [...activeMints] }));
+}
 
 function startBuyCounter(mint) {
   buyCounters.set(mint, { count: 0, startedAt: Date.now(), buys: [] });
-  setTimeout(() => buyCounters.delete(mint), 90_000);
+  activeMints.add(mint);
+  resubscribeToActiveMints();
+
+  setTimeout(() => {
+    buyCounters.delete(mint);
+    activeMints.delete(mint);
+    resubscribeToActiveMints();
+  }, 90_000);
 }
 
 function recordBuy(mint, traderAddress) {
@@ -46,10 +70,8 @@ export function startPumpfunListener() {
   ws.on('open', () => {
     console.log('[pumpfun] connected, subscribing to new token events');
     ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
-    // NOTE: subscribeTokenTrade requires specific mint addresses in `keys`
-    // — an empty array subscribes to nothing. Trades are subscribed to
-    // per-token, dynamically, in handleNewLaunch below as each token is
-    // detected, and unsubscribed once its 90s tracking window closes.
+    // Trade subscriptions are managed entirely via resubscribeToActiveMints()
+    // as tokens are detected/expire — see startBuyCounter above.
   });
 
   ws.on('message', async (raw) => {
@@ -63,7 +85,6 @@ export function startPumpfunListener() {
     // New token creation event
     if (msg.mint && msg.txType === 'create') {
       startBuyCounter(msg.mint);
-      ws.send(JSON.stringify({ method: 'subscribeTokenTrade', keys: [msg.mint] }));
       handleNewLaunch(msg).catch((err) =>
         console.error('[pumpfun] handleNewLaunch error:', err.message)
       );
@@ -104,12 +125,9 @@ async function logEarlyBuyers(mintAddress, buys) {
 async function handleNewLaunch(msg) {
   // Give the token ~90s to accumulate initial buy activity before scoring,
   // since buy velocity is one of the signals. This trades a little latency
-  // for a materially better signal.
+  // for a materially better signal. Unsubscribe happens automatically via
+  // the setTimeout in startBuyCounter, not here.
   await new Promise((resolve) => setTimeout(resolve, 90_000));
-
-  // Done tracking this one — unsubscribe so we're not holding an
-  // ever-growing list of per-token trade subscriptions open indefinitely.
-  ws.send(JSON.stringify({ method: 'unsubscribeTokenTrade', keys: [msg.mint] }));
 
   const buys = getBuys(msg.mint);
 
