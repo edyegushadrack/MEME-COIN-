@@ -28,6 +28,52 @@ const BUY_DISCRIMINATOR = Buffer.from([102, 6, 61, 18, 1, 218, 235, 234]);
 const SELL_DISCRIMINATOR = Buffer.from([51, 230, 133, 164, 1, 127, 131, 173]);
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
+// Simple concurrency limiter: at most N getParsedTransaction calls in
+// flight at once, queueing the rest. Prevents bursting past the Helius
+// free tier's per-second rate limit when many bonding curves are active
+// at the same time — each individual subscription is cheap, but dozens
+// firing close together adds up fast without this.
+const MAX_CONCURRENT_LOOKUPS = 4;
+let activeLookups = 0;
+const queue = [];
+
+function runQueued() {
+  if (activeLookups >= MAX_CONCURRENT_LOOKUPS || queue.length === 0) return;
+  activeLookups++;
+  const { task, resolve, reject } = queue.shift();
+  task()
+    .then(resolve, reject)
+    .finally(() => {
+      activeLookups--;
+      runQueued();
+    });
+}
+
+function withConcurrencyLimit(task) {
+  return new Promise((resolve, reject) => {
+    queue.push({ task, resolve, reject });
+    runQueued();
+  });
+}
+
+async function getParsedTransactionWithRetry(connection, signature, { retries = 3 } = {}) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await withConcurrencyLimit(() =>
+        connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 })
+      );
+    } catch (err) {
+      const isRateLimit = err.message?.includes('429') || err.message?.includes('Too Many Requests');
+      if (isRateLimit && attempt < retries) {
+        const delay = 500 * 2 ** attempt; // 500ms, 1s, 2s, 4s
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 function matchesDiscriminator(dataBuffer, discriminator) {
   return dataBuffer.length >= 8 && dataBuffer.subarray(0, 8).equals(discriminator);
 }
@@ -47,9 +93,7 @@ export function bondingCurvePda(mintAddress) {
  * null for anything else (e.g. a create, or an unrelated instruction).
  */
 async function parseTradeTransaction(connection, signature, mintAddress) {
-  const tx = await connection.getParsedTransaction(signature, {
-    maxSupportedTransactionVersion: 0,
-  });
+  const tx = await getParsedTransactionWithRetry(connection, signature);
   if (!tx || !tx.meta || tx.meta.err) return null;
 
   const allInstructions = [
