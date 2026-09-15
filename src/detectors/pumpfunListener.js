@@ -23,6 +23,8 @@ const buyCounters = new Map();
 // bot/sniper traffic on every launch.
 const activeMints = new Set();
 
+let debugMessageCount = 0;
+
 // Module-level reference to the live socket, so subscription helpers and
 // handleNewLaunch can send messages as the active-mint set changes.
 let ws;
@@ -80,6 +82,16 @@ export function startPumpfunListener() {
       msg = JSON.parse(raw.toString());
     } catch {
       return;
+    }
+
+    // TEMPORARY DEBUG: log the raw shape of the first 15 non-create
+    // messages so we can see real field names instead of guessing again.
+    // Remove this block once buy/sell tracking is confirmed working.
+    if (msg.txType !== 'create') {
+      debugMessageCount++;
+      if (debugMessageCount <= 15) {
+        console.log(`[DEBUG raw message #${debugMessageCount}]`, JSON.stringify(msg));
+      }
     }
 
     // New token creation event
