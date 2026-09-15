@@ -10,6 +10,11 @@ import { sendLaunchAlert, sendVetoAlert } from '../notify/telegramNotifier.js';
 // the first 90s after detection, purely in memory.
 const buyCounters = new Map();
 
+// Module-level reference to the live socket, so handleNewLaunch can send
+// subscribe/unsubscribe messages for individual tokens as they're detected
+// and as their 90s tracking window closes.
+let ws;
+
 function startBuyCounter(mint) {
   buyCounters.set(mint, { count: 0, startedAt: Date.now(), buys: [] });
   setTimeout(() => buyCounters.delete(mint), 90_000);
@@ -36,12 +41,15 @@ function getBuys(mint) {
 }
 
 export function startPumpfunListener() {
-  const ws = new WebSocket(config.pumpPortalWsUrl);
+  ws = new WebSocket(config.pumpPortalWsUrl);
 
   ws.on('open', () => {
     console.log('[pumpfun] connected, subscribing to new token events');
     ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
-    ws.send(JSON.stringify({ method: 'subscribeTokenTrade', keys: [] }));
+    // NOTE: subscribeTokenTrade requires specific mint addresses in `keys`
+    // — an empty array subscribes to nothing. Trades are subscribed to
+    // per-token, dynamically, in handleNewLaunch below as each token is
+    // detected, and unsubscribed once its 90s tracking window closes.
   });
 
   ws.on('message', async (raw) => {
@@ -55,16 +63,13 @@ export function startPumpfunListener() {
     // New token creation event
     if (msg.mint && msg.txType === 'create') {
       startBuyCounter(msg.mint);
+      ws.send(JSON.stringify({ method: 'subscribeTokenTrade', keys: [msg.mint] }));
       handleNewLaunch(msg).catch((err) =>
         console.error('[pumpfun] handleNewLaunch error:', err.message)
       );
     }
 
     // Trade event on a token we're currently tracking in the buy-velocity window.
-    // NOTE: `traderPublicKey` is PumpPortal's documented field name for the
-    // buyer's wallet as of this writing — if bundler detection never
-    // triggers even on obviously bundled launches, check this field name
-    // first against a raw logged message.
     if (msg.mint && msg.txType === 'buy') {
       recordBuy(msg.mint, msg.traderPublicKey);
     }
@@ -102,6 +107,10 @@ async function handleNewLaunch(msg) {
   // for a materially better signal.
   await new Promise((resolve) => setTimeout(resolve, 90_000));
 
+  // Done tracking this one — unsubscribe so we're not holding an
+  // ever-growing list of per-token trade subscriptions open indefinitely.
+  ws.send(JSON.stringify({ method: 'unsubscribeTokenTrade', keys: [msg.mint] }));
+
   const buys = getBuys(msg.mint);
 
   // Bundler/sniper check: many distinct wallets buying within seconds of
@@ -131,6 +140,7 @@ async function handleNewLaunch(msg) {
     lpLockedOrBurned: true, // pump.fun bonding curve LP is program-controlled by default
     buysFirst90s: getBuyCount(msg.mint),
     hasSocials: Boolean(msg.twitter || msg.telegram || msg.website),
+    marketCapSol: msg.marketCapSol ?? null,
   };
 
   const { score, breakdown, disqualified } = scoreLaunch(signals);
@@ -149,6 +159,7 @@ async function handleNewLaunch(msg) {
     top10_holder_pct: signals.top10HolderPct,
     buys_first_90s: signals.buysFirst90s,
     has_socials: signals.hasSocials,
+    market_cap_sol: signals.marketCapSol,
     score,
     score_breakdown: breakdown,
     paper_bought: score >= config.minScoreToPaperBuy,

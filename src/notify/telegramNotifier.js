@@ -45,17 +45,20 @@ export async function sendMessage(text, { parseMode = 'Markdown' } = {}) {
 }
 
 /** Alert for a launch that cleared the paper-buy score threshold. */
-export function formatLaunchAlert({ mint_address, symbol, score, score_breakdown }) {
+export function formatLaunchAlert({ mint_address, symbol, score, score_breakdown, market_cap_sol }) {
   const topSignals = Object.entries(score_breakdown || {})
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3)
     .map(([k, v]) => `${k}: ${v.toFixed(1)}`)
     .join(', ');
 
+  const marketCapLine =
+    market_cap_sol != null ? `Market cap: ${market_cap_sol.toFixed(1)} SOL\n` : '';
+
   return [
     `*New paper-buy candidate* — score ${score}/100`,
     `${symbol ? symbol + ' — ' : ''}\`${mint_address}\``,
-    `Top signals: ${topSignals}`,
+    `${marketCapLine}Top signals: ${topSignals}`,
     `[pump.fun](https://pump.fun/${mint_address}) | [Solscan](https://solscan.io/token/${mint_address})`,
   ].join('\n');
 }
