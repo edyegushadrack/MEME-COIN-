@@ -17,6 +17,7 @@ create table if not exists launches (
   top10_holder_pct numeric,
   dev_holder_pct numeric,
   buys_first_90s integer,
+  trade_data_watched boolean default false,
   market_cap_sol numeric,
   has_socials boolean,
 

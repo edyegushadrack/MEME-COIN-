@@ -33,7 +33,7 @@ const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 // free tier's per-second rate limit when many bonding curves are active
 // at the same time — each individual subscription is cheap, but dozens
 // firing close together adds up fast without this.
-const MAX_CONCURRENT_LOOKUPS = 4;
+const MAX_CONCURRENT_LOOKUPS = 1;
 let activeLookups = 0;
 const queue = [];
 

@@ -16,6 +16,15 @@ const buyCounters = new Map();
 // individually once its 90s window closes.
 const tradeSubscriptions = new Map();
 
+// Hard cap on how many tokens we watch on-chain at once. pump.fun can
+// launch tokens faster than a free-tier RPC can serve lookups for all of
+// them, and unbounded concurrent subscriptions was the real cause of
+// sustained 429s — not the per-request throttling. Watching a sampled
+// subset properly beats watching everything badly: partial buyer data on
+// some launches is far more useful than rate-limited garbage on all of
+// them. Raise this if you move to a paid RPC tier.
+const MAX_CONCURRENT_WATCHED_TOKENS = 5;
+
 // Shared RPC connection for on-chain trade watching. New tokens are
 // detected via PumpPortal's free subscribeNewToken (ws below); individual
 // buy/sell activity is watched directly on-chain via this connection,
@@ -26,19 +35,29 @@ const connection = new Connection(config.rpcUrl, 'confirmed');
 let ws;
 
 function startBuyCounter(mint) {
-  buyCounters.set(mint, { count: 0, startedAt: Date.now(), buys: [] });
+  buyCounters.set(mint, { count: 0, startedAt: Date.now(), buys: [], watched: false });
 
-  const subId = subscribeToTokenTrades(connection, mint, (event) => {
+  // Only subscribe on-chain if we have capacity. Tokens beyond the cap
+  // still get detected, scored, and logged — they just won't have buyer
+  // data. buys_first_90s will be 0 for them, which is why `watched` is
+  // tracked and stored, so the backtest can tell "no buyers observed"
+  // apart from "we weren't watching".
+  if (tradeSubscriptions.size < MAX_CONCURRENT_WATCHED_TOKENS) {
     const counter = buyCounters.get(mint);
-    if (!counter) return; // window already closed
-    if (event.type !== 'buy') return; // only buys count toward buysFirst90s / early buyers
-    counter.count += 1;
-    counter.buys.push({
-      address: event.buyer,
-      secondsAfterLaunch: (Date.now() - counter.startedAt) / 1000,
+    counter.watched = true;
+
+    const subId = subscribeToTokenTrades(connection, mint, (event) => {
+      const c = buyCounters.get(mint);
+      if (!c) return; // window already closed
+      if (event.type !== 'buy') return; // only buys count toward buysFirst90s / early buyers
+      c.count += 1;
+      c.buys.push({
+        address: event.buyer,
+        secondsAfterLaunch: (Date.now() - c.startedAt) / 1000,
+      });
     });
-  });
-  tradeSubscriptions.set(mint, subId);
+    tradeSubscriptions.set(mint, subId);
+  }
 
   setTimeout(async () => {
     buyCounters.delete(mint);
@@ -48,6 +67,10 @@ function startBuyCounter(mint) {
       tradeSubscriptions.delete(mint);
     }
   }, 90_000);
+}
+
+function wasWatched(mint) {
+  return buyCounters.get(mint)?.watched ?? false;
 }
 
 function getBuyCount(mint) {
@@ -163,6 +186,7 @@ async function handleNewLaunch(msg) {
     lp_locked_or_burned: signals.lpLockedOrBurned,
     top10_holder_pct: signals.top10HolderPct,
     buys_first_90s: signals.buysFirst90s,
+    trade_data_watched: wasWatched(msg.mint),
     has_socials: signals.hasSocials,
     market_cap_sol: signals.marketCapSol,
     score,
